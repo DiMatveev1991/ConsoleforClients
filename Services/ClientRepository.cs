@@ -63,7 +63,7 @@ WHERE
         {
             result.Add(new ClientPayer
             {
-                PayerNum = reader.GetInt64(reader.GetOrdinal("PayerNum")),
+                PayerNum = Convert.ToInt64(reader.GetValue(reader.GetOrdinal("PayerNum"))),
                 ClientCode = GetNullableString(reader, "ClientCode"),
                 PayerNameRus = GetNullableString(reader, "PayerNameRus"),
                 Inn = GetNullableString(reader, "INN"),
