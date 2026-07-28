@@ -163,7 +163,7 @@ var tasks = clients.Select(async client =>
             switch (result.Outcome)
             {
                 case EnrichmentOutcome.AlreadyFilled:
-                    Emit($"{who} -> ПРОПУСК: все целевые поля уже заполнены", ConsoleColor.DarkGray);
+                    Emit($"{who} -> ПРОПУСК: {result.Message ?? "заполнять нечего"}", ConsoleColor.DarkGray);
                     break;
                 case EnrichmentOutcome.SkippedAmbiguous:
                     Emit($"{who} -> ПРОПУСК: {result.Message}", ConsoleColor.Yellow);

@@ -44,6 +44,11 @@ public sealed class EnrichmentService
         if (string.IsNullOrWhiteSpace(client.Inn))
             return new EnrichmentResult(client, EnrichmentOutcome.SkippedNoMatch, Message: "Пустой ИНН");
 
+        // Если заполнять нечего — к сервису не обращаемся вовсе.
+        if (!NeedsEnrichment(client))
+            return new EnrichmentResult(client, EnrichmentOutcome.AlreadyFilled,
+                Message: "все целевые поля уже заполнены — запрос не выполнялся");
+
         var kpp = client.HasKpp ? client.Kpp!.Trim() : null;
         var inn = NormalizeInn(client.Inn);
 
@@ -82,9 +87,23 @@ public sealed class EnrichmentService
         var update = BuildUpdate(client, primary, main);
 
         if (!update.HasChanges)
-            return new EnrichmentResult(client, EnrichmentOutcome.AlreadyFilled);
+            return new EnrichmentResult(client, EnrichmentOutcome.AlreadyFilled,
+                Message: "в ответе сервиса нет недостающих данных");
 
         return new EnrichmentResult(client, EnrichmentOutcome.Enriched, update);
+    }
+
+    /// <summary>
+    /// Есть ли у клиента хотя бы одно пустое целевое поле, которое имеет смысл заполнять.
+    /// Если нет — запрос к сервису не нужен.
+    /// </summary>
+    private static bool NeedsEnrichment(ClientPayer client)
+    {
+        var needsType = client.ContragentTypeId is null;
+        var needsOgrn = string.IsNullOrWhiteSpace(client.Ogrn);
+        var needsKpp = !client.HasKpp;
+        var needsDirector = string.IsNullOrWhiteSpace(client.GeneralDirectorPositionName);
+        return needsType || needsOgrn || needsKpp || needsDirector;
     }
 
     /// <summary>
