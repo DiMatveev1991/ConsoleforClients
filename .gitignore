@@ -1,0 +1,5 @@
+bin/
+obj/
+*.user
+enrichment-log.txt
+appsettings.local.json
