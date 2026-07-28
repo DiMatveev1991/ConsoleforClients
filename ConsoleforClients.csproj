@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>ConsoleForClients</RootNamespace>
     <AssemblyName>ConsoleForClients</AssemblyName>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>
