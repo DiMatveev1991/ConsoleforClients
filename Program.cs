@@ -26,6 +26,8 @@ using var http = new HttpClient
     BaseAddress = new Uri(serviceOptions.BaseUrl),
     Timeout = TimeSpan.FromSeconds(serviceOptions.TimeoutSeconds)
 };
+// Сервис отдаёт JSON как text/plain — совпадает с рабочим curl из swagger.
+http.DefaultRequestHeaders.Accept.ParseAdd("text/plain");
 
 var api = new ContragentApiClient(http, serviceOptions);
 var repo = new ClientRepository(connectionString, enrichmentOptions);
