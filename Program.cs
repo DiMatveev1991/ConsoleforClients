@@ -62,11 +62,45 @@ Console.CancelKeyPress += (_, e) =>
     Console.WriteLine("\nОстановка по запросу пользователя…");
 };
 
-var logLock = new object();
+var ioLock = new object();
 await using var log = new StreamWriter(logFile, append: false, Encoding.UTF8) { AutoFlush = true };
+
+// Только в файл-лог.
 void Log(string line)
 {
-    lock (logLock) log.WriteLine(line);
+    lock (ioLock) log.WriteLine(line);
+}
+
+// В консоль (с цветом) и в файл-лог одновременно.
+void Emit(string line, ConsoleColor? color = null)
+{
+    lock (ioLock)
+    {
+        if (color is { } c)
+        {
+            var prev = Console.ForegroundColor;
+            Console.ForegroundColor = c;
+            Console.WriteLine(line);
+            Console.ForegroundColor = prev;
+        }
+        else
+        {
+            Console.WriteLine(line);
+        }
+        log.WriteLine(line);
+    }
+}
+
+// Перечень заполненных полей для строки-отчёта.
+static string DescribeFilled(ConsoleForClients.Services.ClientUpdate u)
+{
+    var parts = new List<string>();
+    if (u.ContragentTypeId is not null) parts.Add($"Тип={u.ContragentTypeId}");
+    if (u.Ogrn is not null) parts.Add($"ОГРН={u.Ogrn}");
+    if (u.Kpp is not null) parts.Add($"КПП={u.Kpp}");
+    if (u.GeneralDirector is not null) parts.Add($"ФИО={u.GeneralDirector}");
+    if (u.GeneralDirectorPositionName is not null) parts.Add($"Должность={u.GeneralDirectorPositionName}");
+    return parts.Count == 0 ? "(нет изменений)" : string.Join("; ", parts);
 }
 
 // ── Загрузка клиентов ───────────────────────────────────────────────────────
@@ -89,9 +123,14 @@ Log($"Старт: {clients.Count} клиентов, {DateTimeOffset.Now:yyyy-MM-
 var gate = new SemaphoreSlim(Math.Max(1, serviceOptions.Concurrency));
 var processed = 0;
 
+var total = clients.Count;
+
 var tasks = clients.Select(async client =>
 {
     await gate.WaitAsync(cts.Token);
+    var n = Interlocked.Increment(ref processed);
+    var who = $"[{n}/{total}] PayerNum={client.PayerNum} Код={client.ClientCode} " +
+              $"ИНН={client.Inn} КПП={(client.HasKpp ? client.Kpp : "нет")} «{client.PayerNameRus}»";
     try
     {
         var result = await enricher.ProcessAsync(client, cts.Token);
@@ -104,29 +143,44 @@ var tasks = clients.Select(async client =>
                 if (affected == 0)
                 {
                     stats.RegisterUpdateFailed();
-                    Log($"[UPDATE-0] PayerNum={client.PayerNum} ИНН={client.Inn} — строка не обновлена");
+                    Emit($"{who} -> ОШИБКА: строка не обновлена (0 строк)", ConsoleColor.Red);
                 }
                 else
                 {
                     stats.Register(EnrichmentOutcome.Enriched);
-                    Log($"[OK] PayerNum={client.PayerNum} ИНН={client.Inn} КПП={client.Kpp} " +
-                        $"-> Type={result.Update.ContragentTypeId} OGRN={result.Update.Ogrn} " +
-                        $"KPP={result.Update.Kpp} Дир={result.Update.GeneralDirector} " +
-                        $"Должн={result.Update.GeneralDirectorPositionName}");
+                    Emit($"{who} -> ЗАПОЛНЕН: {DescribeFilled(result.Update)}", ConsoleColor.Green);
                 }
             }
             catch (Exception ex)
             {
                 stats.RegisterUpdateFailed();
-                Log($"[DB-ERR] PayerNum={client.PayerNum} ИНН={client.Inn} — {ex.Message}");
+                Emit($"{who} -> ОШИБКА записи в БД: {ex.Message}", ConsoleColor.Red);
             }
         }
         else
         {
             stats.Register(result.Outcome);
-            if (result.Outcome is not EnrichmentOutcome.AlreadyFilled)
-                Log($"[{result.Outcome}] PayerNum={client.PayerNum} ИНН={client.Inn} КПП={client.Kpp}" +
-                    (result.Message is null ? "" : $" — {result.Message}"));
+            switch (result.Outcome)
+            {
+                case EnrichmentOutcome.AlreadyFilled:
+                    Emit($"{who} -> ПРОПУСК: все целевые поля уже заполнены", ConsoleColor.DarkGray);
+                    break;
+                case EnrichmentOutcome.SkippedAmbiguous:
+                    Emit($"{who} -> ПРОПУСК: {result.Message}", ConsoleColor.Yellow);
+                    break;
+                case EnrichmentOutcome.SkippedNoMatch:
+                    Emit($"{who} -> ПРОПУСК: {result.Message}", ConsoleColor.Yellow);
+                    break;
+                case EnrichmentOutcome.NotFound:
+                    Emit($"{who} -> НЕ ЗАПОЛНЕН: сервис ничего не вернул по ИНН", ConsoleColor.Yellow);
+                    break;
+                case EnrichmentOutcome.Error:
+                    Emit($"{who} -> ОШИБКА запроса к сервису: {result.Message}", ConsoleColor.Red);
+                    break;
+                default:
+                    Emit($"{who} -> {result.Outcome}: {result.Message}");
+                    break;
+            }
         }
     }
     catch (OperationCanceledException)
@@ -136,14 +190,11 @@ var tasks = clients.Select(async client =>
     catch (Exception ex)
     {
         stats.Register(EnrichmentOutcome.Error);
-        Log($"[ERR] PayerNum={client.PayerNum} ИНН={client.Inn} — {ex.Message}");
+        Emit($"{who} -> ОШИБКА: {ex.Message}", ConsoleColor.Red);
     }
     finally
     {
         gate.Release();
-        var n = Interlocked.Increment(ref processed);
-        if (n % 100 == 0 || n == clients.Count)
-            Console.Write($"\rОбработано: {n}/{clients.Count}   ");
     }
 }).ToArray();
 
