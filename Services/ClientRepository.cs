@@ -79,6 +79,33 @@ WHERE
     }
 
     /// <summary>
+    /// Читает справочник типов контрагента (Types_ContragentTypes):
+    /// ContragentTypeName (строка из сервиса, напр. "LEGAL") -> ContragentTypeId.
+    /// Регистронезависимо. Пустой словарь — таблица недоступна/пуста.
+    /// </summary>
+    public async Task<Dictionary<string, int>> GetContragentTypeMapAsync(CancellationToken ct)
+    {
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        const string sql =
+            "SELECT ContragentTypeName, ContragentTypeId FROM dbo.Types_ContragentTypes WITH (NOLOCK);";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var name = GetNullableString(reader, "ContragentTypeName");
+            if (string.IsNullOrWhiteSpace(name) || reader.IsDBNull(reader.GetOrdinal("ContragentTypeId")))
+                continue;
+            map[name.Trim()] = Convert.ToInt32(reader.GetValue(reader.GetOrdinal("ContragentTypeId")));
+        }
+
+        return map;
+    }
+
+    /// <summary>
     /// Обновляет только переданные (непустые) поля одной строки ClientsPayers по PayerNum.
     /// Возвращает число затронутых строк.
     /// </summary>

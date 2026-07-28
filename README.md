@@ -29,8 +29,12 @@
 2. `ContragentService:BaseUrl` и `:Path` — адрес и маршрут эндпоинта из swagger
    (по умолчанию `/api/contragent`; вызов идёт как
    `{BaseUrl}{Path}?inn=...&kpp=...&showMainContragent=true`).
-3. `Enrichment:ContragentTypeMap` — **сверить с вашим справочником типов контрагентов**
-   (по умолчанию `LEGAL=1`, `INDIVIDUAL=2`).
+3. `Enrichment:ContragentTypeMap` — маппинг типа контрагента. При старте берётся из
+   справочника `dbo.Types_ContragentTypes` (`LEGAL=1`, `INDIVIDUAL=2`), этот блок —
+   запасной вариант, если таблица недоступна.
+
+ИНН с потерянным ведущим нулём (в БД лежит короче 10/12 знаков) при вызове сервиса
+автоматически дополняется нулём слева.
 
 Опционально: `Concurrency` (одновременных запросов), `MaxClients` (лимит на запуск, `0` = все).
 

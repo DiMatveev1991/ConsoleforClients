@@ -29,8 +29,30 @@ using var http = new HttpClient
 
 var api = new ContragentApiClient(http, serviceOptions);
 var repo = new ClientRepository(connectionString, enrichmentOptions);
-var enricher = new EnrichmentService(api, enrichmentOptions);
 var stats = new Statistics();
+
+// Маппинг типа контрагента берём из справочника БД (Types_ContragentTypes),
+// конфиг appsettings — запасной вариант, если таблица недоступна.
+try
+{
+    var dbMap = await repo.GetContragentTypeMapAsync(CancellationToken.None);
+    if (dbMap.Count > 0)
+    {
+        enrichmentOptions.ContragentTypeMap = dbMap;
+        Console.WriteLine($"Справочник типов контрагента из БД: " +
+            string.Join(", ", dbMap.Select(kv => $"{kv.Key}={kv.Value}")));
+    }
+    else
+    {
+        Console.WriteLine("Справочник Types_ContragentTypes пуст — используется маппинг из appsettings.");
+    }
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"Не удалось прочитать Types_ContragentTypes ({ex.Message}) — используется маппинг из appsettings.");
+}
+
+var enricher = new EnrichmentService(api, enrichmentOptions);
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>

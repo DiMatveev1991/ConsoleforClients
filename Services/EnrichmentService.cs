@@ -45,8 +45,9 @@ public sealed class EnrichmentService
             return new EnrichmentResult(client, EnrichmentOutcome.SkippedNoMatch, Message: "Пустой ИНН");
 
         var kpp = client.HasKpp ? client.Kpp!.Trim() : null;
+        var inn = NormalizeInn(client.Inn);
 
-        var response = await _api.GetAsync(client.Inn.Trim(), kpp, ct);
+        var response = await _api.GetAsync(inn, kpp, ct);
         if (response is null)
             return new EnrichmentResult(client, EnrichmentOutcome.Error, Message: "Сервис недоступен/ошибка");
 
@@ -124,6 +125,20 @@ public sealed class EnrichmentService
         }
 
         return update;
+    }
+
+    /// <summary>
+    /// Восстанавливает потерянные ведущие нули ИНН.
+    /// ИНН ЮЛ — 10 знаков, ИП — 12. Если в БД лежит короче (обрезан ноль слева) —
+    /// дополняем: до 10 (если короче 10) или до 12 (если 11).
+    /// </summary>
+    private static string NormalizeInn(string inn)
+    {
+        var s = inn.Trim();
+        if (s.Length is 10 or 12) return s;
+        if (s.Length < 10) return s.PadLeft(10, '0');
+        if (s.Length == 11) return s.PadLeft(12, '0');
+        return s;
     }
 
     /// <summary>
