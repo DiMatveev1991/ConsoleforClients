@@ -1,5 +1,8 @@
 bin/
 obj/
+.vs/
+[Bb]in/
+[Oo]bj/
 *.user
 enrichment-log.txt
 appsettings.local.json

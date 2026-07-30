@@ -30,6 +30,13 @@ public sealed record EnrichmentResult(
 /// </summary>
 public sealed class EnrichmentService
 {
+    /// <summary>
+    /// Предел длины ClientsPayers.GeneralDirector.
+    /// Колонка расширена до varchar(150) 30.07.2026 (вместе с log_table_ClientsPayers,
+    /// ClientsReqisitsHistory, ClientsSalesDep, log_table_ClientsSalesDep).
+    /// </summary>
+    private const int FioMaxLength = 150;
+
     private readonly ContragentApiClient _api;
     private readonly EnrichmentOptions _options;
 
@@ -107,7 +114,9 @@ public sealed class EnrichmentService
     }
 
     /// <summary>
-    /// Заполняет ТОЛЬКО пустые поля клиента. Уже заполненные не трогаем.
+    /// Справочные поля (тип, ОГРН, КПП) заполняются только если пусты.
+    /// Руководитель — по правилу должности: пустая должность разрешает запись пары
+    /// «ФИО + должность», непустая запрещает трогать оба поля.
     /// </summary>
     private ClientUpdate BuildUpdate(ClientPayer client, ContragentDto primary, ContragentDto main)
     {
@@ -129,17 +138,25 @@ public sealed class EnrichmentService
         if (!client.HasKpp && !string.IsNullOrWhiteSpace(main.Kpp))
             update.Kpp = main.Kpp.Trim();
 
-        // ФИО + должность директора — только если ДОЛЖНОСТЬ пустая.
-        // Если должность уже заполнена — ни должность, ни ФИО не перезаписываем.
+        // ФИО + должность директора — решает ТОЛЬКО должность.
+        // Должность непустая  -> не трогаем ни должность, ни ФИО.
+        // Должность пустая    -> пишем оба поля; ФИО перезаписываем БЕЗУСЛОВНО,
+        //                        даже если оно уже заполнено (инициалы вида
+        //                        «Конев А.Е.» заменяются полным ФИО из ЕГРЮЛ).
         if (string.IsNullOrWhiteSpace(client.GeneralDirectorPositionName))
         {
             var (fio, post) = ResolveDirector(main, primary);
             if (!string.IsNullOrWhiteSpace(fio) && !string.IsNullOrWhiteSpace(post))
             {
-                update.GeneralDirectorPositionName = post;
-                // ФИО заполняем вместе с должностью, тоже только если оно пустое.
-                if (string.IsNullOrWhiteSpace(client.GeneralDirector))
+                // Не влезает в колонку — не пишем НИ ОДНО из двух полей.
+                // Обрезать ФИО нельзя (порча данных), а записать одну лишь должность
+                // означало бы навсегда закрыть карточку для повторного прохода:
+                // непустая должность запрещает запись руководителя.
+                if (fio.Length <= FioMaxLength)
+                {
+                    update.GeneralDirectorPositionName = post;
                     update.GeneralDirector = fio;
+                }
             }
         }
 
