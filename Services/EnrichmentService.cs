@@ -215,17 +215,43 @@ public sealed class EnrichmentService
         //                        «Конев А.Е.» заменяются полным ФИО из ЕГРЮЛ).
         if (string.IsNullOrWhiteSpace(client.GeneralDirectorPositionName))
         {
-            var (fio, post) = ResolveDirector(main, primary);
-            if (!string.IsNullOrWhiteSpace(fio) && !string.IsNullOrWhiteSpace(post))
+            var mgmt = main.Managment ?? primary.Managment;
+
+            // Организацией руководит УПРАВЛЯЮЩАЯ КОМПАНИЯ: ЕГРЮЛ отдаёт её название
+            // в managment.fio, а managment.post оставляет пустым — человека-руководителя
+            // у такой организации нет. Название УК кладём в ДОЛЖНОСТЬ: она nvarchar(max),
+            // ограничения по длине нет, а GeneralDirector — varchar(150), куда длинные
+            // названия вида «ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ УПРАВЛЯЮЩАЯ
+            // КОМПАНИЯ "..."» попросту не влезают. ФИО при этом не трогаем.
+            var isManagementCompany = mgmt is not null
+                && !string.IsNullOrWhiteSpace(mgmt.Fio)
+                && string.IsNullOrWhiteSpace(mgmt.Post);
+
+            // Только для ДЕЙСТВУЮЩИХ организаций. У ликвидированных ЕГРЮЛ хранит
+            // последнюю известную запись об управляющей компании, и без этой проверки
+            // она попадала бы в должность — причём необратимо: непустая должность
+            // навсегда закрывает карточку для повторного прохода.
+            var isActive = !string.IsNullOrWhiteSpace(main.State)
+                && string.Equals(main.State.Trim(), "ACTIVE", StringComparison.OrdinalIgnoreCase);
+
+            if (isManagementCompany && _options.FillPositionFromManagementCompany && isActive)
             {
-                // Не влезает в колонку — не пишем НИ ОДНО из двух полей.
-                // Обрезать ФИО нельзя (порча данных), а записать одну лишь должность
-                // означало бы навсегда закрыть карточку для повторного прохода:
-                // непустая должность запрещает запись руководителя.
-                if (fio.Length <= FioMaxLength)
+                update.GeneralDirectorPositionName = mgmt!.Fio.Trim();
+            }
+            else
+            {
+                var (fio, post) = ResolveDirector(main, primary);
+                if (!string.IsNullOrWhiteSpace(fio) && !string.IsNullOrWhiteSpace(post))
                 {
-                    update.GeneralDirectorPositionName = post;
-                    update.GeneralDirector = fio;
+                    // Не влезает в колонку — не пишем НИ ОДНО из двух полей.
+                    // Обрезать ФИО нельзя (порча данных), а записать одну лишь должность
+                    // означало бы навсегда закрыть карточку для повторного прохода:
+                    // непустая должность запрещает запись руководителя.
+                    if (fio.Length <= FioMaxLength)
+                    {
+                        update.GeneralDirectorPositionName = post;
+                        update.GeneralDirector = fio;
+                    }
                 }
             }
         }
@@ -251,26 +277,19 @@ public sealed class EnrichmentService
     /// Руководитель: приоритет — managment головной записи, затем primary.
     /// Для ИП (managment нет) — individuaL_FIO + должность из конфигурации.
     ///
-    /// Отдельный случай: организацией управляет УПРАВЛЯЮЩАЯ КОМПАНИЯ. Тогда ЕГРЮЛ
-    /// отдаёт её название в managment.fio, а managment.post оставляет пустым — и пара
-    /// «ФИО + должность» не складывается, карточка навсегда остаётся незаполненной.
-    /// Подставляем должность из настройки ManagementCompanyPositionName; если она
-    /// пустая, поведение прежнее — такие карточки не заполняются.
+    /// Случай управляющей компании (managment.fio заполнен, managment.post пуст)
+    /// сюда НЕ попадает — он разбирается отдельно в BuildUpdate.
     ///
     /// У ФИЛИАЛОВ managment пуст всегда: руководитель числится за головной организацией.
     /// </summary>
     private (string? fio, string? post) ResolveDirector(ContragentDto main, ContragentDto primary)
     {
         var mgmt = main.Managment ?? primary.Managment;
-        if (mgmt is not null && !string.IsNullOrWhiteSpace(mgmt.Fio))
+        if (mgmt is not null
+            && !string.IsNullOrWhiteSpace(mgmt.Fio)
+            && !string.IsNullOrWhiteSpace(mgmt.Post))
         {
-            if (!string.IsNullOrWhiteSpace(mgmt.Post))
-                return (mgmt.Fio.Trim(), mgmt.Post.Trim());
-
-            if (!string.IsNullOrWhiteSpace(_options.ManagementCompanyPositionName))
-                return (mgmt.Fio.Trim(), _options.ManagementCompanyPositionName.Trim());
-
-            return (null, null);
+            return (mgmt.Fio.Trim(), mgmt.Post.Trim());
         }
 
         var individualFio = main.IndividualFio ?? primary.IndividualFio;

@@ -14,19 +14,24 @@ public sealed class EnrichmentOptions
 {
     public int AgentCode { get; set; } = 304;
     public int ClientDepartment { get; set; } = 1;
-    public Dictionary<string, int> ContragentTypeMap { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-    public string IndividualPositionName { get; set; } = "Индивидуальный предприниматель";
-    public int MaxClients { get; set; }
 
-    public int MaxRequests { get; set; }
+    public Dictionary<string, int> ContragentTypeMap { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Должность для ИП, если сервис вернул только individuaL_FIO без managment.</summary>
+    public string IndividualPositionName { get; set; } = "Индивидуальный предприниматель";
 
     /// <summary>
-    /// Должность, подставляемая когда организацией управляет управляющая компания:
-    /// ЕГРЮЛ отдаёт её название в managment.fio, а managment.post оставляет пустым.
-    /// Пустая строка — прежнее поведение, такие карточки не заполняются.
+    /// Организациями под управляющей компанией ЕГРЮЛ отдаёт её название в managment.fio,
+    /// а managment.post оставляет пустым — человека-руководителя у них нет.
+    /// При true название УК записывается в ДОЛЖНОСТЬ (GeneralDirectorPositionName,
+    /// nvarchar(max), ограничения по длине нет), а ФИО не трогается.
+    /// При false такие карточки не заполняются вовсе — поведение как раньше.
     /// </summary>
-    public string ManagementCompanyPositionName { get; set; } = "";
+    public bool FillPositionFromManagementCompany { get; set; }
 
+    /// <summary>Больше нигде не читается: отбор ограничивается через MaxRequests.</summary>
+    public int MaxClients { get; set; }
 
-
+    /// <summary>Ограничение по числу РАЗЛИЧНЫХ запросов к сервису за запуск (0 = без ограничения).</summary>
+    public int MaxRequests { get; set; }
 }
