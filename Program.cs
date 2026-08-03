@@ -18,7 +18,14 @@ var serviceOptions = config.GetSection("ContragentService").Get<ContragentServic
     ?? new ContragentServiceOptions();
 var enrichmentOptions = config.GetSection("Enrichment").Get<EnrichmentOptions>()
     ?? new EnrichmentOptions();
-var logFile = config.GetValue<string>("LogFile") ?? "enrichment-log.txt";
+
+// Имя лог-файла всегда с отметкой времени запуска: прогон разбит на несколько
+// заходов (дневной лимит запросов к сервису), и файл не должен затирать предыдущий.
+var logBase = config.GetValue<string>("LogFile") ?? "enrichment-log.txt";
+var logDir = Path.GetDirectoryName(logBase);
+var logFile = Path.Combine(
+    string.IsNullOrEmpty(logDir) ? "" : logDir,
+    $"{Path.GetFileNameWithoutExtension(logBase)}-{DateTime.Now:yyyyMMdd-HHmmss}{Path.GetExtension(logBase)}");
 
 // ── Инфраструктура ──────────────────────────────────────────────────────────
 using var http = new HttpClient
@@ -105,6 +112,10 @@ static string DescribeFilled(ConsoleForClients.Services.ClientUpdate u)
     return parts.Count == 0 ? "(нет изменений)" : string.Join("; ", parts);
 }
 
+// Пометка сервиса (расхождение КПП, неактивное состояние организации) — в конец строки.
+static string DescribeNote(string? message)
+    => string.IsNullOrWhiteSpace(message) ? "" : $" [{message}]";
+
 // ── Загрузка клиентов ───────────────────────────────────────────────────────
 Console.WriteLine("Загрузка московских клиентов КО с ИНН…");
 List<ConsoleForClients.Models.ClientPayer> clients;
@@ -150,7 +161,8 @@ var tasks = clients.Select(async client =>
                 else
                 {
                     stats.Register(EnrichmentOutcome.Enriched);
-                    Emit($"{who} -> ЗАПОЛНЕН: {DescribeFilled(result.Update)}", ConsoleColor.Green);
+                    Emit($"{who} -> ЗАПОЛНЕН: {DescribeFilled(result.Update)}{DescribeNote(result.Message)}",
+                        ConsoleColor.Green);
                 }
             }
             catch (Exception ex)
@@ -174,7 +186,8 @@ var tasks = clients.Select(async client =>
                     Emit($"{who} -> ПРОПУСК: {result.Message}", ConsoleColor.Yellow);
                     break;
                 case EnrichmentOutcome.NotFound:
-                    Emit($"{who} -> НЕ ЗАПОЛНЕН: сервис ничего не вернул по ИНН", ConsoleColor.Yellow);
+                    Emit($"{who} -> НЕ ЗАПОЛНЕН: сервис ничего не вернул ни по ИНН+КПП, ни по одному ИНН",
+                        ConsoleColor.Yellow);
                     break;
                 case EnrichmentOutcome.Error:
                     Emit($"{who} -> ОШИБКА запроса к сервису: {result.Message}", ConsoleColor.Red);

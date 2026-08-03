@@ -20,34 +20,71 @@ public sealed class ClientRepository
     /// <summary>
     /// Московские клиенты (AgentCode) с принадлежностью КО (Client_Department)
     /// и непустым ИНН, у которых есть хотя бы одно незаполненное целевое поле.
+    ///
+    /// Ограничение задаётся числом РАЗЛИЧНЫХ запросов к сервису (MaxRequests), а не числом
+    /// карточек: берутся первые N различных пар ИНН+КПП и ВСЕ карточки с этими парами.
+    ///
+    /// Из отбора исключены заведомо незаполнимые карточки:
+    ///   * КПП — не заполняется никогда (в ветке kpp is null ставится skipKpp, а запись
+    ///     требует пустого КПП у карточки), а у ИП и физлиц его не существует;
+    ///   * ИНН на 9909 — иностранные организации и их представительства, в ЕГРЮЛ отсутствуют;
+    ///   * ИНН длиной не 10 и не 12 — битые значения (КПП или БИК в поле ИНН, обрезанные номера).
+    /// Без этих условий очередь не опустеет никогда: карточки возвращаются в выборку
+    /// на каждом заходе и тратят лимит запросов впустую.
     /// </summary>
     public async Task<List<ClientPayer>> GetClientsToEnrichAsync(CancellationToken ct)
     {
-        var top = _options.MaxClients > 0 ? $"TOP ({_options.MaxClients})" : "";
-
-        var sql = $@"
-SELECT {top}
-     cp.PayerNum,
-     cp.ClientCode,
-     cp.PayerNameRus,
-     cp.INN,
-     cp.KPP,
-     cp.GeneralDirector,
-     cp.GeneralDirectorPositionName,
-     cp.ContragentTypeId,
-     cp.OGRN
-FROM ClientsPayers cp WITH (NOLOCK)
-INNER JOIN Clients c WITH (NOLOCK) ON cp.PayerNum = c.PayerNum
-WHERE
-     c.AgentCode = @AgentCode
-     AND c.Client_Department = @ClientDepartment
-     AND LTRIM(RTRIM(cp.INN)) <> ''
-     AND (
-          cp.ContragentTypeId IS NULL
-       OR cp.OGRN IS NULL OR LTRIM(RTRIM(cp.OGRN)) = ''
-       OR cp.KPP IS NULL OR LTRIM(RTRIM(cp.KPP)) = ''
-       OR cp.GeneralDirectorPositionName IS NULL OR LTRIM(RTRIM(cp.GeneralDirectorPositionName)) = ''
-     );";
+        const string sql = @"
+WITH scope AS (
+    SELECT
+         cp.PayerNum,
+         cp.ClientCode,
+         cp.PayerNameRus,
+         cp.INN,
+         cp.KPP,
+         cp.GeneralDirector,
+         cp.GeneralDirectorPositionName,
+         cp.ContragentTypeId,
+         cp.OGRN,
+         LTRIM(RTRIM(cp.INN))              AS ReqInn,
+         ISNULL(LTRIM(RTRIM(cp.KPP)), '')  AS ReqKpp
+    FROM ClientsPayers cp WITH (NOLOCK)
+    INNER JOIN Clients c WITH (NOLOCK) ON cp.PayerNum = c.PayerNum
+    WHERE
+         c.AgentCode = @AgentCode
+         AND c.Client_Department = @ClientDepartment
+         AND LTRIM(RTRIM(cp.INN)) <> ''
+         AND LTRIM(RTRIM(cp.INN)) NOT LIKE '9909%'
+         AND LEN(LTRIM(RTRIM(cp.INN))) IN (10, 12)
+         AND (
+              cp.ContragentTypeId IS NULL
+           OR cp.OGRN IS NULL OR LTRIM(RTRIM(cp.OGRN)) = ''
+           OR cp.GeneralDirectorPositionName IS NULL OR LTRIM(RTRIM(cp.GeneralDirectorPositionName)) = ''
+         )
+),
+keys AS (
+    -- первые N РАЗЛИЧНЫХ запросов к сервису; порядок стабильный, чтобы заходы не пересекались
+    SELECT TOP (@MaxRequests)
+           ReqInn,
+           ReqKpp
+    FROM scope
+    GROUP BY ReqInn, ReqKpp
+    ORDER BY MIN(PayerNum)
+)
+SELECT s.PayerNum,
+       s.ClientCode,
+       s.PayerNameRus,
+       s.INN,
+       s.KPP,
+       s.GeneralDirector,
+       s.GeneralDirectorPositionName,
+       s.ContragentTypeId,
+       s.OGRN
+FROM scope s
+INNER JOIN keys k
+        ON k.ReqInn = s.ReqInn
+       AND k.ReqKpp = s.ReqKpp
+ORDER BY s.PayerNum;";
 
         var result = new List<ClientPayer>();
 
@@ -57,6 +94,8 @@ WHERE
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@AgentCode", _options.AgentCode);
         cmd.Parameters.AddWithValue("@ClientDepartment", _options.ClientDepartment);
+        cmd.Parameters.AddWithValue("@MaxRequests",
+            _options.MaxRequests > 0 ? _options.MaxRequests : int.MaxValue);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -76,6 +115,49 @@ WHERE
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Сколько карточек и сколько РАЗЛИЧНЫХ запросов осталось во всём охвате (без учёта MaxRequests).
+    /// Условия те же, что в основной выборке.
+    /// </summary>
+    public async Task<(int Cards, int Requests)> GetRemainingAsync(CancellationToken ct)
+    {
+        const string sql = @"
+WITH scope AS (
+    SELECT cp.PayerNum,
+           LTRIM(RTRIM(cp.INN))             AS ReqInn,
+           ISNULL(LTRIM(RTRIM(cp.KPP)), '') AS ReqKpp
+    FROM ClientsPayers cp WITH (NOLOCK)
+    INNER JOIN Clients c WITH (NOLOCK) ON cp.PayerNum = c.PayerNum
+    WHERE
+         c.AgentCode = @AgentCode
+         AND c.Client_Department = @ClientDepartment
+         AND LTRIM(RTRIM(cp.INN)) <> ''
+         AND LTRIM(RTRIM(cp.INN)) NOT LIKE '9909%'
+         AND LEN(LTRIM(RTRIM(cp.INN))) IN (10, 12)
+         AND (
+              cp.ContragentTypeId IS NULL
+           OR cp.OGRN IS NULL OR LTRIM(RTRIM(cp.OGRN)) = ''
+           OR cp.GeneralDirectorPositionName IS NULL OR LTRIM(RTRIM(cp.GeneralDirectorPositionName)) = ''
+         )
+)
+SELECT COUNT(*)                                     AS Cards,
+       COUNT(DISTINCT CONCAT(ReqInn, '|', ReqKpp))  AS Requests
+FROM scope;";
+
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@AgentCode", _options.AgentCode);
+        cmd.Parameters.AddWithValue("@ClientDepartment", _options.ClientDepartment);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+            return (Convert.ToInt32(reader.GetValue(0)), Convert.ToInt32(reader.GetValue(1)));
+
+        return (0, 0);
     }
 
     /// <summary>

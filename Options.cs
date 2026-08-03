@@ -17,4 +17,16 @@ public sealed class EnrichmentOptions
     public Dictionary<string, int> ContragentTypeMap { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public string IndividualPositionName { get; set; } = "Индивидуальный предприниматель";
     public int MaxClients { get; set; }
+
+    public int MaxRequests { get; set; }
+
+    /// <summary>
+    /// Должность, подставляемая когда организацией управляет управляющая компания:
+    /// ЕГРЮЛ отдаёт её название в managment.fio, а managment.post оставляет пустым.
+    /// Пустая строка — прежнее поведение, такие карточки не заполняются.
+    /// </summary>
+    public string ManagementCompanyPositionName { get; set; } = "";
+
+
+
 }

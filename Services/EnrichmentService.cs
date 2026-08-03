@@ -8,11 +8,11 @@ public enum EnrichmentOutcome
     Enriched,
     /// <summary>Все целевые поля уже заполнены — обновлять нечего.</summary>
     AlreadyFilled,
-    /// <summary>Нет КПП и сервис вернул неоднозначный ответ (не ровно 1 запись).</summary>
+    /// <summary>Ответ неоднозначный и головной записи в нём нет.</summary>
     SkippedAmbiguous,
     /// <summary>С КПП, но подходящей записи не нашлось.</summary>
     SkippedNoMatch,
-    /// <summary>Сервис ничего не вернул по ИНН.</summary>
+    /// <summary>Сервис ничего не вернул ни по паре ИНН+КПП, ни по одному ИНН.</summary>
     NotFound,
     /// <summary>Ошибка запроса к сервису.</summary>
     Error
@@ -63,18 +63,53 @@ public sealed class EnrichmentService
         if (response is null)
             return new EnrichmentResult(client, EnrichmentOutcome.Error, Message: "Сервис недоступен/ошибка");
 
+        // Сервис ищет по ПАРЕ ИНН+КПП и отдаёт 404 (пустой список), если такой пары нет.
+        // Три подтверждённые причины:
+        //   1) КПП крупнейшего налогоплательщика (99xx-50-xxx) в ЕГРЮЛ отсутствует — КАРКАДЕ;
+        //   2) КПП в карточке устарел после смены инспекции — Центр ЮрИнфоР;
+        //   3) организация представлена в ЕГРЮЛ только филиалами, головной записи нет.
+        // ОГРН, тип контрагента и руководитель от КПП не зависят, поэтому повторяем
+        // запрос по одному ИНН и дальше берём головную запись.
+        var kppUnknown = false;
+        if (response.Count == 0 && kpp is not null)
+        {
+            response = await _api.GetAsync(inn, null, ct);
+            if (response is null)
+                return new EnrichmentResult(client, EnrichmentOutcome.Error,
+                    Message: "Сервис недоступен/ошибка при повторе без КПП");
+            kppUnknown = true;
+        }
+
         if (response.Count == 0)
             return new EnrichmentResult(client, EnrichmentOutcome.NotFound);
 
         // Выбор основной записи под клиента.
         ContragentDto? primary;
-        if (kpp is null)
+        var skipKpp = false;
+        string? ambiguityNote = null;
+
+        if (kpp is null || kppUnknown)
         {
-            // Без КПП: пригодно только если ответ однозначный (ровно одна запись).
-            if (response.Count != 1)
-                return new EnrichmentResult(client, EnrichmentOutcome.SkippedAmbiguous,
-                    Message: $"Без КПП сервис вернул {response.Count} записей");
-            primary = response[0];
+            // Сопоставить карточку с конкретным подразделением нечем.
+            // Берём головную запись: ОГРН, тип и руководитель у неё и у филиалов
+            // одинаковы (у филиалов managment вообще пуст). КПП при этом не заполняем.
+            primary = response.FirstOrDefault(r => r.IsMain);
+
+            if (primary is null)
+            {
+                // Головной записи в ответе нет. Так бывает у иностранных представительств
+                // (головная контора за рубежом и в ЕГРЮЛ отсутствует) и у организаций,
+                // представленных только филиалами. Раньше такие карточки пропускались
+                // целиком; теперь берём первую запись: запрос шёл по ИНН, значит все
+                // записи принадлежат одному юрлицу, а ОГРН и тип у них общие.
+                primary = response[0];
+                if (response.Count > 1)
+                    ambiguityNote = $"головной записи (MAIN) нет, взята первая из {response.Count}";
+                else
+                    ambiguityNote = "головной записи (MAIN) нет, взята единственная";
+            }
+
+            skipKpp = true;
         }
         else
         {
@@ -89,28 +124,61 @@ public sealed class EnrichmentService
         }
 
         // Головная запись (MAIN) — источник главного КПП и руководителя.
+        // Если её нет, вместо неё выступает primary.
         var main = response.FirstOrDefault(r => r.IsMain) ?? primary;
 
-        var update = BuildUpdate(client, primary, main);
+        var update = BuildUpdate(client, primary, main, skipKpp);
+        var note = BuildNote(kpp, kppUnknown, main, ambiguityNote);
 
         if (!update.HasChanges)
             return new EnrichmentResult(client, EnrichmentOutcome.AlreadyFilled,
-                Message: "в ответе сервиса нет недостающих данных");
+                Message: note ?? "в ответе сервиса нет недостающих данных");
 
-        return new EnrichmentResult(client, EnrichmentOutcome.Enriched, update);
+        return new EnrichmentResult(client, EnrichmentOutcome.Enriched, update, note);
     }
 
     /// <summary>
     /// Есть ли у клиента хотя бы одно пустое целевое поле, которое имеет смысл заполнять.
     /// Если нет — запрос к сервису не нужен.
+    ///
+    /// КПП из проверки ИСКЛЮЧЁН: он не заполняется никогда (в ветке выбора головной записи
+    /// ставится skipKpp, а запись требует пустого КПП у карточки), а у ИП и физлиц его
+    /// не существует. Иначе такие карточки возвращались бы в выборку на каждом заходе.
     /// </summary>
     private static bool NeedsEnrichment(ClientPayer client)
     {
         var needsType = client.ContragentTypeId is null;
         var needsOgrn = string.IsNullOrWhiteSpace(client.Ogrn);
-        var needsKpp = !client.HasKpp;
         var needsDirector = string.IsNullOrWhiteSpace(client.GeneralDirectorPositionName);
-        return needsType || needsOgrn || needsKpp || needsDirector;
+        return needsType || needsOgrn || needsDirector;
+    }
+
+    /// <summary>
+    /// Пометки к строке отчёта. В БД ничего не пишет — только для лога.
+    /// КПП сознательно НЕ перезаписываем: поле ведётся из 1С, и ближайший прогон
+    /// синхронизации вернёт своё значение. Расхождение фиксируем, чтобы получить
+    /// список карточек, где КПП в 1С разошёлся с ЕГРЮЛ.
+    /// </summary>
+    private static string? BuildNote(string? kpp, bool kppUnknown, ContragentDto main, string? ambiguityNote)
+    {
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(ambiguityNote))
+            parts.Add(ambiguityNote);
+
+        if (kppUnknown && !string.IsNullOrWhiteSpace(main.Kpp)
+            && !string.Equals(main.Kpp.Trim(), kpp, StringComparison.Ordinal))
+        {
+            parts.Add($"КПП {kpp} в ЕГРЮЛ не найден, у головной записи {main.Kpp.Trim()}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(main.State)
+            && !string.Equals(main.State.Trim(), "ACTIVE", StringComparison.OrdinalIgnoreCase))
+        {
+            parts.Add($"состояние организации: {main.State.Trim()}");
+        }
+
+        return parts.Count == 0 ? null : string.Join("; ", parts);
     }
 
     /// <summary>
@@ -118,7 +186,7 @@ public sealed class EnrichmentService
     /// Руководитель — по правилу должности: пустая должность разрешает запись пары
     /// «ФИО + должность», непустая запрещает трогать оба поля.
     /// </summary>
-    private ClientUpdate BuildUpdate(ClientPayer client, ContragentDto primary, ContragentDto main)
+    private ClientUpdate BuildUpdate(ClientPayer client, ContragentDto primary, ContragentDto main, bool skipKpp)
     {
         var update = new ClientUpdate();
 
@@ -134,8 +202,10 @@ public sealed class EnrichmentService
         if (string.IsNullOrWhiteSpace(client.Ogrn) && !string.IsNullOrWhiteSpace(primary.Ogrn))
             update.Ogrn = primary.Ogrn.Trim();
 
-        // KPP — только если у клиента пусто: берём главный КПП (запись MAIN).
-        if (!client.HasKpp && !string.IsNullOrWhiteSpace(main.Kpp))
+        // KPP — только если у клиента пусто И ответ однозначно относится к его подразделению.
+        // При выборе головной записи из нескольких КПП не пишем: карточка может
+        // принадлежать филиалу, а мы подставили бы КПП головной организации.
+        if (!skipKpp && !client.HasKpp && !string.IsNullOrWhiteSpace(main.Kpp))
             update.Kpp = main.Kpp.Trim();
 
         // ФИО + должность директора — решает ТОЛЬКО должность.
@@ -180,15 +250,27 @@ public sealed class EnrichmentService
     /// <summary>
     /// Руководитель: приоритет — managment головной записи, затем primary.
     /// Для ИП (managment нет) — individuaL_FIO + должность из конфигурации.
+    ///
+    /// Отдельный случай: организацией управляет УПРАВЛЯЮЩАЯ КОМПАНИЯ. Тогда ЕГРЮЛ
+    /// отдаёт её название в managment.fio, а managment.post оставляет пустым — и пара
+    /// «ФИО + должность» не складывается, карточка навсегда остаётся незаполненной.
+    /// Подставляем должность из настройки ManagementCompanyPositionName; если она
+    /// пустая, поведение прежнее — такие карточки не заполняются.
+    ///
+    /// У ФИЛИАЛОВ managment пуст всегда: руководитель числится за головной организацией.
     /// </summary>
     private (string? fio, string? post) ResolveDirector(ContragentDto main, ContragentDto primary)
     {
         var mgmt = main.Managment ?? primary.Managment;
-        if (mgmt is not null
-            && !string.IsNullOrWhiteSpace(mgmt.Fio)
-            && !string.IsNullOrWhiteSpace(mgmt.Post))
+        if (mgmt is not null && !string.IsNullOrWhiteSpace(mgmt.Fio))
         {
-            return (mgmt.Fio.Trim(), mgmt.Post.Trim());
+            if (!string.IsNullOrWhiteSpace(mgmt.Post))
+                return (mgmt.Fio.Trim(), mgmt.Post.Trim());
+
+            if (!string.IsNullOrWhiteSpace(_options.ManagementCompanyPositionName))
+                return (mgmt.Fio.Trim(), _options.ManagementCompanyPositionName.Trim());
+
+            return (null, null);
         }
 
         var individualFio = main.IndividualFio ?? primary.IndividualFio;
